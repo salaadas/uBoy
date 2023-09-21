@@ -1,10 +1,19 @@
-#include <iostream>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <cstdint>
+#include <cstring>
 #include <fstream>
+#include <iostream>
 #include <string>
 #include <vector>
+
+/*
+ * LOGS:
+ *
+ * - Load ROMS
+ * - Read|Write bytes
+ * @ Cpu opcodes
+ */
 
 // Will delete later
 using namespace std;
@@ -105,7 +114,7 @@ namespace CPU
 
     template<bool write> u8 MemAccess(u16 addr, u8 value=0);
     u8 RB(u16 addr) { return MemAccess<false>(addr); }
-    u8 WB(u16 addr, u8 value) { return MemAccess<true>(addr); }
+    u8 WB(u16 addr, u8 value) { return MemAccess<true>(addr, value); }
     void tick();
 }
 
@@ -189,6 +198,7 @@ namespace CPU
     template<bool write> u8 MemAccess(u16 addr, u8 v) {
         tick();
         // macros??
+
         #define writeOrRet(what) u8 &r = what; if (!write) return r; r=v
         if (addr <= 0x3FFF) {
             writeOrRet(Cartridge::ROM[addr]);
@@ -264,10 +274,69 @@ namespace CPU
             exit(1);}
         return 0;
     }
+
+    // Bisqwit's Nesemu:        https://bisqwit.iki.fi/jutut/kuvat/programming_examples/nesemu1/nesemu1.cc
+    // Explanation for Bisqwit: https://www.maizure.org/projects/decoded-bisqwit-nes-emulator/nesemu1_decoded.txt
+    // BASE64 Encoder:          https://cryptii.com/pipes/base64-to-hex
+    template<u8 op>
+    void Ins() {
+        return;
+    }
+
+    // this would be the ``loop''
+    void Op() {
+        u8 op = RB(registers.PC++);
+
+        // Today I learned about the paste operator a.k.a. ## in c++
+        #define c(n) Ins<0x10>, Ins<0x10>,
+        #define o(n) c(n)c(n+2)c(n+4)c(n+6)
+        static void (*i[0x108])() = {
+            o(00)o(08)o(10)
+        };
+        #undef o
+        #undef c
+    }
 }
 
 int main()
 {
+    // Initial state
+    // resetting everything
+    memset(Cartridge::ROM,  0, sizeof(Cartridge::ROM));
+    memset(PPU::VRAM,       0, sizeof(PPU::VRAM));
+    memset(Cartridge::SRAM, 0, sizeof(Cartridge::SRAM));
+    memset(PPU::OAM,        0, sizeof(PPU::OAM));
+    memset(Cartridge::HRAM, 0, sizeof(Cartridge::HRAM));
+
+    // Registers
+    CPU::registers.A  = 0x01;   CPU::registers.F  = 0xB0;
+    CPU::registers.B  = 0x00;   CPU::registers.C  = 0x13;
+    CPU::registers.D  = 0x00;   CPU::registers.E  = 0xD8;
+    CPU::registers.H  = 0x01;   CPU::registers.L  = 0x4D;
+    CPU::registers.SP = 0xFFFE; CPU::registers.PC = 0x0100;
+
+    // Interrupts
+    IO::joypad.keys    = 0xFF;  CPU::interrupts.IME = 0;
+    CPU::interrupts.IE = 0;     CPU::interrupts.IF  = 0x01;
+
+    // Timing
+    CPU::timer.DIV = 0xAB;      CPU::timer.TIMA = 0;
+    CPU::timer.TMA = 0;         CPU::timer.TAC  = 0xF8;
+
+    // LCD
+    PPU::lcd.LY     = 0;        PPU::lcd.control = 0x91;
+    PPU::lcd.status = 0x85;     PPU::lcd.SCY     = 0;
+    PPU::lcd.SCX    = 0;        PPU::lcd.LYC     = 0;
+    PPU::lcd.WY     = 0;        PPU::lcd.WX      = 0;
+
+    // Palettes
+    CPU::WB(0xFF47, 0xFC);
+    CPU::WB(0xFF48, 0xFF);
+    CPU::WB(0xFF49, 0xFF);
+    // end of reset
+
+    printf("-------------u(r mom's)-Boy-------------\n");
+
     Cartridge::LoadRom(fp);
     u8 version_code = Cartridge::ROM[header::version_number];
     version = version_code;
