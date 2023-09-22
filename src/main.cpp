@@ -13,6 +13,9 @@
  * - Load ROMS
  * - Read|Write bytes
  * @ Cpu opcodes
+ * - Accurate Timing
+ * - Rendering
+ * - APU
  */
 
 // Will delete later
@@ -195,6 +198,11 @@ namespace CPU
             };};
     } timer;
 
+    void NOP() {}
+    void STOP() {if (!Interrupts.FJoypad) registers.PC--;}
+    void LDnn() {
+    }
+
     template<bool write> u8 MemAccess(u16 addr, u8 v) {
         tick();
         // macros??
@@ -202,18 +210,20 @@ namespace CPU
         #define writeOrRet(what) u8 &r = what; if (!write) return r; r=v
         if (addr <= 0x3FFF) {
             writeOrRet(Cartridge::ROM[addr]);
-            printf("WARNING: Just wrote %d @%X\n", v, addr);}
+            printf("WARNING: Just wrote %d @ %04X\n", v, addr);
+            exit(1);}
         else if (addr <= 0x7FFF) {
             writeOrRet(Cartridge::ROM[addr]);
-            printf("WARNING: Just wrote %d @%X\n", v, addr);}
+            printf("WARNING: Just wrote %d @ %04X\n", v, addr);
+            exit(1);}
         else if (addr <= 0x9FFF) {
             writeOrRet(PPU::VRAM[addr - 0x8000]);}
         else if (addr <= 0xBFFF) {
-            printf("WARNING: The memory here is not supposed to be accessed by MBC0 ROMS\n");}
+            printf("WARNING: The memory here (0x%04X) is not supposed to be accessed by MBC0 ROMS\n", addr);
+            exit(1);}
         else if (addr <= 0xDFFF) {
-            fprintf(stderr, "ERROR: WRAM is unimplemented\n");
-            exit(1);
-        }
+            fprintf(stderr, "ERROR: WRAM is unimplemented (@ 0x%04X)\n", addr);
+            exit(1);}
         else if (0xFE00 <= addr && addr <= 0xFE9F) {
             writeOrRet(PPU::OAM[addr - 0XFE00]);}
         else if (addr <= 0xFEFF) {
@@ -280,21 +290,78 @@ namespace CPU
     // BASE64 Encoder:          https://cryptii.com/pipes/base64-to-hex
     template<u8 op>
     void Ins() {
-        return;
+        // parsing by components:
+        // https://gb-archive.github.io/salvage/decoding_gbz80_opcodes/Decoding%20Gamboy%20Z80%20Opcodes.html
+
+        // to get the flags, we do i.e. registers.F & FLAG_ZERO
+        // table "cc" (indexed 0)
+        // NZ Z NC C
+        // ^    ^
+        // |    Not carry
+        // Not zero
+
+        unsigned x = op>>6, y = (op>>3)&7, z = op&7, p = y>>1, q = y%2;
+        switch (x) {
+            case 0: {
+                switch (z) {
+                    // Relative jumps
+                    case 0: {
+                        switch (y) {
+                            case 0: {tick(); /* NOP */} break;
+                            case 1: {LDnn(); /* write that operand to SP */} break;
+                            case 2: {/* STOP */} break;
+                            case 3: {/* JR d */} break;
+                            case 4: case 5: case 6:
+                            case 7: {/* JR cc[y-4], d */} break;
+                            default: goto endofall;
+                        }
+                    } break;
+                    // 16-bit [load immediate | add]
+                    case 1: {
+                        switch (q) {
+                            case 0: {/* LD rp[p]--BC, nn */} break;
+                            case 1: {/* ADD HL, rp[p]--DE*/} break;
+                        }
+                    } break;
+                    // Conditional jumps
+                    case 2: {
+                        switch (y) {
+                            case 0: case 1: case 2:
+                            case 3: {/* JP cc[y], nn */} break;
+                            case 4: {/* LD(0xFF00+C),A */} break;
+                            case 5: {/* LD(nn),A */} break;
+                            case 6: {/* LD A,(0xFF00+C) */} break;
+                            case 7: {/* LD A, nn */} return;
+                        }
+                    } break;
+                }
+            } break;
+endofall:
+            default: {
+                printf("ERROR: opcode 0x%02X is unimplemented\n", op);
+                printf("TRACE: was called @ addr 0x%04X\n", registers.PC-1);
+                // exit(1);
+            }
+        }
     }
 
     // this would be the ``loop''
     void Op() {
-        u8 op = RB(registers.PC++);
+        unsigned op = RB(registers.PC++);
 
         // Today I learned about the paste operator a.k.a. ## in c++
-        #define c(n) Ins<0x10>, Ins<0x10>,
+        #define c(n) Ins<0x##n>, Ins<0x##n+1>,
         #define o(n) c(n)c(n+2)c(n+4)c(n+6)
         static void (*i[0x108])() = {
-            o(00)o(08)o(10)
+            o(00)o(08)o(10)o(18)o(20)o(28)o(30)o(38)
+            o(40)o(48)o(50)o(58)o(60)o(68)o(70)o(78)
+            o(80)o(88)o(90)o(98)o(A0)o(A8)o(B0)o(B8)
+            o(C0)o(C8)o(D0)o(D8)o(E0)o(E8)o(F0)o(F8)
         };
         #undef o
         #undef c
+
+        i[op]();
     }
 }
 
@@ -343,7 +410,9 @@ int main()
 
     printf("Title:\t\t %s (version %d)\n", Cartridge::title, version);
 
-    // Cartridge and MBC (which is no MBC currently)
+    // printf("pc: %04X\n", CPU::registers.PC);
+    // for (;;)
+    CPU::Op();
 
     return(0);
 }
