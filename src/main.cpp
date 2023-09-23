@@ -229,10 +229,10 @@ namespace CPU
         // set if carry on bit 15
         set_flag(FLAG_C, r > 0xFFFF);
     }
-    void addhl(u16 val) {
-        u16 r = registers.HL + val;
-        add16(registers.HL, val);
-        registers.HL = result;
+    void addhl(u16 *val) {
+        u16 r = registers.HL + *val;
+        add16(registers.HL, *val);
+        registers.HL = r;
     }
 
     template<bool write> u8 MemAccess(u16 addr, u8 v) {
@@ -387,15 +387,33 @@ namespace CPU
                             case 1: {addhl(rp[(op>>4)/2]); cyc+=1;} break;
                         }
                     } break;
-                    // Conditional jumps
+                    // Indirect loading
                     case 2: {
-                        switch (y) {
-                            case 0: case 1: case 2:
-                            case 3: {/* JP cc[y], nn */} break;
-                            case 4: {/* LD(0xFF00+C),A */} break;
-                            case 5: {/* LD(nn),A */} break;
-                            case 6: {/* LD A,(0xFF00+C) */} break;
-                            case 7: {/* LD A, nn */} return;
+                        switch (q) {
+                            case 0: {
+                                if (q == 0) {WB(registers.BC, registers.A);}
+                                else if (q == 1) {WB(registers.DE, registers.A);}
+                                else if (q == 2) {
+                                    WB(registers.HL, registers.A); registers.HL++;
+                                }
+                                else if (q == 3) {
+                                    WB(registers.HL, registers.A); registers.HL--;
+                                }
+                                cyc+=1;
+                            } break;
+                            case 1: {
+                                u8 rval;
+                                if (q == 0) {rval = RB(registers.BC);}
+                                else if (q == 1) {rval = RB(registers.DE);}
+                                else if (q == 2) {
+                                    rval = RB(registers.HL); registers.HL++;
+                                }
+                                else if (q == 3) {
+                                    rval = RB(registers.HL); registers.HL--;
+                                }
+                                registers.A = rval;
+                                cyc+=1;
+                            }
                         }
                     } break;
                     // 16-bit INC/DEC
