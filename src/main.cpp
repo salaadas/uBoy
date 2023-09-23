@@ -30,7 +30,7 @@ using namespace std;
 
 // Flags
 // *********************************
-#define FLAG_ZERO (1 << 7)
+#define FLAG_Z (1 << 7)
 #define FLAG_N    (1 << 6) // Subtraction flag
 #define FLAG_H    (1 << 5) // Half carry flag
 #define FLAG_C    (1 << 4) // Carry flag
@@ -76,7 +76,7 @@ namespace Cartridge
     void LoadRom(const char *filename) {
         FILE *f;
         f = fopen(filename, "rb");
-        fread(ROM, 0x4000, 1, f);
+        fread(ROM, 0x4000 * 2, 1, f);
         printf("Completed loading ROM: %s\n", filename);
         LoadRomTitle();
         fclose(f);
@@ -115,9 +115,9 @@ namespace CPU
     // http://gameboy.mongenel.com/dmg/asmmemmap.html
     u8 RAM[0x1000]; // Internal RAM
 
-    template<bool write> u8 MemAccess(u16 addr, u8 value=0);
-    u8 RB(u16 addr) { return MemAccess<false>(addr); }
-    u8 WB(u16 addr, u8 value) { return MemAccess<true>(addr, value); }
+    template<bool write> unsigned MemAccess(u16 addr, u8 value=0);
+    unsigned RB(u16 addr) { return MemAccess<false>(addr); }
+    unsigned WB(u16 addr, u8 value) { return MemAccess<true>(addr, value); }
     void tick();
 }
 
@@ -200,7 +200,8 @@ namespace CPU
 
     unsigned ft(unsigned n) {
         unsigned r=0;
-        while (n--) r = (r<<8) | RB(registers.PC++);
+        for (int i=0; i<8*n; i+=8)
+            r = (RB(registers.PC++)<<i) | r;
         return r;
     }
 
@@ -208,8 +209,9 @@ namespace CPU
         if (t) registers.F |= flag;
         else registers.F &= ~(flag);
     }
+    // http://marc.rawer.de/Gameboy/Docs/GBCPUman.pdf
     void nop() {}
-    void stop() {if (!interrupts.FJoypad) registers.PC--;}
+    void stop() {/* if (!interrupts.FJoypad) registers.PC--; */}
     // put value nn into addr
     void writeu16(u16 addr, u16 nn) {
         WB(addr, (u8)(nn & 0xFF));
@@ -217,9 +219,12 @@ namespace CPU
     }
     void load16bit(u16 *addr, u16 nn) {*addr = nn;}
     // jump -127 -> +129 steps from the current address
-    void jump8(u8 d) {
+    void jr(u8 d) {
         int32_t sd = (int32_t)d;
         registers.PC += sd;
+    }
+    void jp(u16 nn) {
+        registers.PC = nn;
     }
     void add16(u16 target, u16 value) {
         int r = target + value;
@@ -235,7 +240,81 @@ namespace CPU
         registers.HL = r;
     }
 
-    template<bool write> u8 MemAccess(u16 addr, u8 v) {
+    // alu functions
+    void aluADDA(u8 value) {
+        u16 r       = (u16)registers.A + (u16)value;
+        registers.A = (r & 0xFF);
+        // set if result == 0                  // reset
+        set_flag(FLAG_Z, (r & 0xFF)==0);       set_flag(FLAG_N, false);
+        // set if carry from bit 7             // set if carry from bit 3
+        set_flag(FLAG_C, r > 0xFF);            set_flag(FLAG_H, ((registers.A & 0xF) +
+                                                                 (value & 0xF)) > 0xF);
+    }
+    void aluADCA(u8 value) {
+        u16 carry   = (registers.F & FLAG_C) ? 1 : 0;
+        u16 r       = (u16)registers.A + (u16)value + carry;
+        registers.A = (r & 0xFF);
+        // set if result == 0                  // reset
+        set_flag(FLAG_Z, (r & 0xFF)==0);       set_flag(FLAG_N, false);
+        // set if carry from bit 7             // set if carry from bit 3
+        set_flag(FLAG_C, r > 0xFF);            set_flag(FLAG_H, ((registers.A & 0xF) +
+                                                                 (value + 0xF) +
+                                                                 (u8)carry) > 0xF);
+    }
+    void aluSUB(u8 value) {
+        int16_t s_A = (int16_t)registers.A,
+                s_v = (int16_t)value;
+        int16_t r   = s_A - s_v;
+        registers.A = (u8)(r & 0xFF);
+        // set if result == 0                  // set to true
+        set_flag(FLAG_Z, (r & 0xFF)==0);       set_flag(FLAG_N, true);
+        // set if no borrow                    // set if no borrow from bit 4
+        set_flag(FLAG_C, r<0);                 set_flag(FLAG_H, ((s_A & 0xF) -
+                                                                 (s_v & 0xF)) < 0);
+    }
+    void aluSBCA(u8 value) {
+        int16_t s_A   = (int16_t)registers.A,
+                s_v   = (int16_t)value,
+                carry = (registers.F & FLAG_C) ? 1 : 0;
+        int16_t r     = s_A - s_v - carry;
+        registers.A   = (u8)(r & 0xFF);
+        // set if result == 0                  // set to true
+        set_flag(FLAG_Z, (r & 0xFF)==0);       set_flag(FLAG_N, true);
+        // set if no borrow                    // set if no borrow from bit 4
+        set_flag(FLAG_C, r<0);                 set_flag(FLAG_H, ((s_A & 0xF) -
+                                                                 (s_v & 0xF) - carry) < 0);
+    }
+    void aluAND(u8 value) {
+        registers.A &= value;
+        set_flag(FLAG_Z, registers.A==0);
+        set_flag(FLAG_N, false);
+        set_flag(FLAG_H, true);
+        set_flag(FLAG_C, false);
+    }
+    void aluXOR(u8 value) {
+        registers.A ^= value;
+        set_flag(FLAG_Z, registers.A==0);
+        set_flag(FLAG_N, false);
+        set_flag(FLAG_H, false);
+        set_flag(FLAG_C, false);
+    }
+    void aluOR(u8 value) {
+        registers.A |= value;
+        set_flag(FLAG_Z, registers.A==0);
+        set_flag(FLAG_N, false);
+        set_flag(FLAG_H, false);
+        set_flag(FLAG_C, false);
+    }
+    // Compare A with n; This is basically a A - n subtraction but the results are thrown away
+    void aluCP(u8 value) {
+        int16_t r = registers.A - value;
+        set_flag(FLAG_Z, r==0);
+        set_flag(FLAG_N, true);
+        set_flag(FLAG_H, ((registers.A & 0xF) - (value & 0xF)) < 0);
+        set_flag(FLAG_C, r<0);
+    }
+
+    template<bool write> unsigned MemAccess(u16 addr, u8 v) {
         tick();
         // macros??
 
@@ -325,32 +404,35 @@ namespace CPU
         // parsing by components:
         // https://gb-archive.github.io/salvage/decoding_gbz80_opcodes/Decoding%20Gamboy%20Z80%20Opcodes.html
 
-        unsigned r[8] = {
+        static unsigned r[8] = {
             registers.B, registers.C, registers.D,  registers.E,
             registers.H, registers.L, registers.HL, registers.A
         };
 
-        u16 *rp[4] = {
+        static u16 *rp[4] = {
             &registers.BC, &registers.DE, &registers.HL, &registers.SP
         };
 
-        u16 *rp2[4] = {
+        static u16 *rp2[4] = {
             &registers.BC, &registers.DE, &registers.HL, &registers.AF
         };
 
-        // to get the flags, we do i.e. registers.F & FLAG_ZERO
+        // to get the flags, we do i.e. registers.F & FLAG_Z
         // table "cc" (indexed 0)
         // NZ Z NC C
         // ^    ^
         // |    Not carry
         // Not zero
 
-        bool cc[4] = {
-            (registers.F & FLAG_ZERO)==0, (registers.F & FLAG_ZERO)!=0,
+        static bool cc[4] = {
+            (registers.F & FLAG_Z)==0, (registers.F & FLAG_Z)!=0,
             (registers.F & FLAG_C)==0, (registers.F & FLAG_C)!=0
         };
 
         // table alu
+        static void (*alu[8])(u8) = {
+            aluADDA, aluADCA, aluSUB, aluSBCA, aluAND, aluXOR, aluOR, aluCP
+        };
 
         // table rot
 
@@ -372,7 +454,7 @@ namespace CPU
                             case 2: {stop();} break;
                             /* JR d */
                             jr8:
-                            case 3: {jump8(ft(1)); cyc+=2;} break;
+                            case 3: {jr(ft(1)); cyc+=2;} break;
                             case 4: case 5: case 6:
                             /* JR cc[y-4], d */
                             case 7: {cyc+=1; if (!cc[y-4]) return; goto jr8;} break;
@@ -416,51 +498,65 @@ namespace CPU
                             }
                         }
                     } break;
-                    // 16-bit INC/DEC
-                    case 3: {
-                        switch (q) {
-                            case 0: {/* INC rp[p] */} break;
-                            case 1: {/* DEC rp[p] */} break;
-                        }
-                    } break;
-                    // 8-bit INC
-                    case 4: {/* INC r[y] */} break;
-                    // 8-bit DEC
-                    case 5: {/* DEC r[y] */} break;
+            //         // 16-bit INC/DEC
+            //         case 3: {
+            //             switch (q) {
+            //                 case 0: {/* INC rp[p] */} break;
+            //                 case 1: {/* DEC rp[p] */} break;
+            //             }
+            //         } break;
+            //         // 8-bit INC
+            //         case 4: {/* INC r[y] */} break;
+            //         // 8-bit DEC
+            //         case 5: {/* DEC r[y] */} break;
                     // 8-bit load immediate
-                    case 6: {/* LD r[y], n */} break;
-                    // operations on [accumulators | flags]
-                    case 7: {
-                        switch (y) {
-                            case 0: {/* RLCA */} break;
-                            case 1: {/* RRCA */} break;
-                            case 2: {/* RLA */} break;
-                            case 3: {/* RRA */} break;
-                            case 4: {/* DAA */} break;
-                            case 5: {/* CPL */} break;
-                            case 6: {/* SCF */} break;
-                            case 7: {/* CCF */} break;
-                        }
+                    case 6: {
+                        /* LD r[y], n */
+                        printf("hey\n");
                     } break;
+            //         // operations on [accumulators | flags]
+            //         case 7: {
+            //             switch (y) {
+            //                 case 0: {/* RLCA */} break;
+            //                 case 1: {/* RRCA */} break;
+            //                 case 2: {/* RLA */} break;
+            //                 case 3: {/* RRA */} break;
+            //                 case 4: {/* DAA */} break;
+            //                 case 5: {/* CPL */} break;
+            //                 case 6: {/* SCF */} break;
+            //                 case 7: {/* CCF */} break;
+            //             }
+            //         } break;
                 } // end of z swich-case
             } break; // end of case x == 0
-            case 1: {
-            } break;
+            // case 1: {
+            // } break;
             case 2: {
+                /* Arithmetic / logic operations */
+                alu[y](r[z]);
+                cyc+=z == 6 ? 1 : 0;
             } break;
             case 3: {
+                switch (z) {
+                    case 3: {
+                        switch (y) {
+                            case 0: {jp(ft(2)); cyc+=3;} break;
+                        }
+                    } break;
+                } // end of z switch-case
             } break;
             // end of x switch-case
             default: {
                 printf("ERROR: opcode 0x%02X is unimplemented\n", op);
                 printf("TRACE: was called @ addr 0x%04X\n", registers.PC-1);
-                // exit(1);
+                exit(1);
             }
         }
     }
     // this would be the ``loop''
     void Op() {
         unsigned op = RB(registers.PC++);
+        printf("PC: 0x%04X\t\tExecuting: 0x%02X\n", registers.PC-1, op);
 
         // Today I learned about the paste operator a.k.a. ## in c++
         #define c(n) Ins<0x##n>, Ins<0x##n+1>,
@@ -524,8 +620,13 @@ int main()
     printf("Title:\t\t %s (version %d)\n", Cartridge::title, version);
 
     // printf("pc: %04X\n", CPU::registers.PC);
-    // for (;;)
-    // CPU::Op();
+
+    // for (int i = CPU::registers.PC; i <= 0x8000; ++i) {
+    //     printf("0x%02X\t0x%04X\n", Cartridge::ROM[i], i);
+    // }
+
+    for (;;)
+    CPU::Op();
 
     return(0);
 }
