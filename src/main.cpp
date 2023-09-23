@@ -204,13 +204,35 @@ namespace CPU
         return r;
     }
 
+    void set_flag(int flag, bool t) {
+        if (t) registers.F |= flag;
+        else registers.F &= ~(flag);
+    }
     void nop() {}
     void stop() {if (!interrupts.FJoypad) registers.PC--;}
-    void load16bit(u16 &addr, u16 nn) {addr = nn;}
+    // put value nn into addr
+    void writeu16(u16 addr, u16 nn) {
+        WB(addr, (u8)(nn & 0xFF));
+        WB(addr, (u8)(nn >> 8));
+    }
+    void load16bit(u16 *addr, u16 nn) {*addr = nn;}
     // jump -127 -> +129 steps from the current address
     void jump8(u8 d) {
         int32_t sd = (int32_t)d;
         registers.PC += sd;
+    }
+    void add16(u16 target, u16 value) {
+        int r = target + value;
+        set_flag(FLAG_N, false);
+        // set if carry on bit 11
+        set_flag(FLAG_H, ((target&0xFFF) + (value&0xFFF) & 0x1000) != 0);
+        // set if carry on bit 15
+        set_flag(FLAG_C, r > 0xFFFF);
+    }
+    void addhl(u16 val) {
+        u16 r = registers.HL + val;
+        add16(registers.HL, val);
+        registers.HL = result;
     }
 
     template<bool write> u8 MemAccess(u16 addr, u8 v) {
@@ -308,12 +330,12 @@ namespace CPU
             registers.H, registers.L, registers.HL, registers.A
         };
 
-        unsigned rp[4] = {
-            registers.BC, registers.DE, registers.HL, registers.SP
+        u16 *rp[4] = {
+            &registers.BC, &registers.DE, &registers.HL, &registers.SP
         };
 
-        unsigned rp2[4] = {
-            registers.BC, registers.DE, registers.HL, registers.AF
+        u16 *rp2[4] = {
+            &registers.BC, &registers.DE, &registers.HL, &registers.AF
         };
 
         // to get the flags, we do i.e. registers.F & FLAG_ZERO
@@ -335,7 +357,9 @@ namespace CPU
         unsigned x = op>>6, y = (op>>3)&7, z = op&7, p = y>>1, q = y%2;
         unsigned cyc = 1; // machine cycles, T-states = machine cycles * 4
         switch (x) {
+            // begin x switch-case
             case 0: {
+                // begin z switch-case
                 switch (z) {
                     // Relative jumps
                     case 0: {
@@ -343,11 +367,11 @@ namespace CPU
                             /* NOP */
                             case 0: {nop();}  break;
                             /* LD NN */
-                            case 1: {load16bit(registers.SP, ft(2)); cyc+=4;} break;
+                            case 1: {writeu16(ft(2), registers.SP); cyc+=4;} break;
                             /* STOP */
                             case 2: {stop();} break;
                             /* JR d */
-jr8:
+                            jr8:
                             case 3: {jump8(ft(1)); cyc+=2;} break;
                             case 4: case 5: case 6:
                             /* JR cc[y-4], d */
@@ -357,8 +381,10 @@ jr8:
                     // 16-bit [load immediate | add]
                     case 1: {
                         switch (q) {
-                            case 0: {/* LD rp[p]--BC, nn */} break;
-                            case 1: {/* ADD HL, rp[p]--DE*/} break;
+                            /* LD rp[p], nn */
+                            case 0: {load16bit(rp[(op>>4)/2], ft(2)); cyc+=2;} break;
+                            /* ADD HL, rp[p]*/
+                            case 1: {addhl(rp[(op>>4)/2]); cyc+=1;} break;
                         }
                     } break;
                     // Conditional jumps
@@ -398,8 +424,15 @@ jr8:
                             case 7: {/* CCF */} break;
                         }
                     } break;
-                }
+                } // end of z swich-case
+            } break; // end of case x == 0
+            case 1: {
             } break;
+            case 2: {
+            } break;
+            case 3: {
+            } break;
+            // end of x switch-case
             default: {
                 printf("ERROR: opcode 0x%02X is unimplemented\n", op);
                 printf("TRACE: was called @ addr 0x%04X\n", registers.PC-1);
@@ -407,7 +440,6 @@ jr8:
             }
         }
     }
-
     // this would be the ``loop''
     void Op() {
         unsigned op = RB(registers.PC++);
