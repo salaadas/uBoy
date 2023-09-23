@@ -1,5 +1,5 @@
 CXX=g++
-CFLAGS=-Wall -Wextra -std=c++17 -ggdb
+CFLAGS=-O3 -std=c++17 -ggdb
 LIBS=-lm
 BIN=uBoy
 

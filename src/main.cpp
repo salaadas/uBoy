@@ -30,10 +30,10 @@ using namespace std;
 
 // Flags
 // *********************************
-#define FLAG_ZERO (0x80)
-#define FLAG_N    (0x40) // Subtraction flag
-#define FLAG_H    (0x10) // Half carry flag
-#define FLAG_C    (0x20) // Carry flag
+#define FLAG_ZERO (1 << 7)
+#define FLAG_N    (1 << 6) // Subtraction flag
+#define FLAG_H    (1 << 5) // Half carry flag
+#define FLAG_C    (1 << 4) // Carry flag
 // *********************************
 
 // https://gbdev.io/pandocs/The_Cartridge_Header.html
@@ -198,9 +198,19 @@ namespace CPU
             };};
     } timer;
 
-    void NOP() {}
-    void STOP() {if (!Interrupts.FJoypad) registers.PC--;}
-    void LDnn() {
+    unsigned ft(unsigned n) {
+        unsigned r=0;
+        while (n--) r = (r<<8) | RB(registers.PC++);
+        return r;
+    }
+
+    void nop() {}
+    void stop() {if (!interrupts.FJoypad) registers.PC--;}
+    void load16bit(u16 &addr, u16 nn) {addr = nn;}
+    // jump -127 -> +129 steps from the current address
+    void jump8(u8 d) {
+        int32_t sd = (int32_t)d;
+        registers.PC += sd;
     }
 
     template<bool write> u8 MemAccess(u16 addr, u8 v) {
@@ -293,6 +303,19 @@ namespace CPU
         // parsing by components:
         // https://gb-archive.github.io/salvage/decoding_gbz80_opcodes/Decoding%20Gamboy%20Z80%20Opcodes.html
 
+        unsigned r[8] = {
+            registers.B, registers.C, registers.D,  registers.E,
+            registers.H, registers.L, registers.HL, registers.A
+        };
+
+        unsigned rp[4] = {
+            registers.BC, registers.DE, registers.HL, registers.SP
+        };
+
+        unsigned rp2[4] = {
+            registers.BC, registers.DE, registers.HL, registers.AF
+        };
+
         // to get the flags, we do i.e. registers.F & FLAG_ZERO
         // table "cc" (indexed 0)
         // NZ Z NC C
@@ -300,20 +323,35 @@ namespace CPU
         // |    Not carry
         // Not zero
 
+        bool cc[4] = {
+            (registers.F & FLAG_ZERO)==0, (registers.F & FLAG_ZERO)!=0,
+            (registers.F & FLAG_C)==0, (registers.F & FLAG_C)!=0
+        };
+
+        // table alu
+
+        // table rot
+
         unsigned x = op>>6, y = (op>>3)&7, z = op&7, p = y>>1, q = y%2;
+        unsigned cyc = 1; // machine cycles, T-states = machine cycles * 4
         switch (x) {
             case 0: {
                 switch (z) {
                     // Relative jumps
                     case 0: {
                         switch (y) {
-                            case 0: {tick(); /* NOP */} break;
-                            case 1: {LDnn(); /* write that operand to SP */} break;
-                            case 2: {/* STOP */} break;
-                            case 3: {/* JR d */} break;
+                            /* NOP */
+                            case 0: {nop();}  break;
+                            /* LD NN */
+                            case 1: {load16bit(registers.SP, ft(2)); cyc+=4;} break;
+                            /* STOP */
+                            case 2: {stop();} break;
+                            /* JR d */
+jr8:
+                            case 3: {jump8(ft(1)); cyc+=2;} break;
                             case 4: case 5: case 6:
-                            case 7: {/* JR cc[y-4], d */} break;
-                            default: goto endofall;
+                            /* JR cc[y-4], d */
+                            case 7: {cyc+=1; if (!cc[y-4]) return; goto jr8;} break;
                         }
                     } break;
                     // 16-bit [load immediate | add]
@@ -334,9 +372,34 @@ namespace CPU
                             case 7: {/* LD A, nn */} return;
                         }
                     } break;
+                    // 16-bit INC/DEC
+                    case 3: {
+                        switch (q) {
+                            case 0: {/* INC rp[p] */} break;
+                            case 1: {/* DEC rp[p] */} break;
+                        }
+                    } break;
+                    // 8-bit INC
+                    case 4: {/* INC r[y] */} break;
+                    // 8-bit DEC
+                    case 5: {/* DEC r[y] */} break;
+                    // 8-bit load immediate
+                    case 6: {/* LD r[y], n */} break;
+                    // operations on [accumulators | flags]
+                    case 7: {
+                        switch (y) {
+                            case 0: {/* RLCA */} break;
+                            case 1: {/* RRCA */} break;
+                            case 2: {/* RLA */} break;
+                            case 3: {/* RRA */} break;
+                            case 4: {/* DAA */} break;
+                            case 5: {/* CPL */} break;
+                            case 6: {/* SCF */} break;
+                            case 7: {/* CCF */} break;
+                        }
+                    } break;
                 }
             } break;
-endofall:
             default: {
                 printf("ERROR: opcode 0x%02X is unimplemented\n", op);
                 printf("TRACE: was called @ addr 0x%04X\n", registers.PC-1);
@@ -412,7 +475,7 @@ int main()
 
     // printf("pc: %04X\n", CPU::registers.PC);
     // for (;;)
-    CPU::Op();
+    // CPU::Op();
 
     return(0);
 }
