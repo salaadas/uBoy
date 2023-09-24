@@ -498,13 +498,16 @@ namespace CPU
                             }
                         }
                     } break;
-            //         // 16-bit INC/DEC
-            //         case 3: {
-            //             switch (q) {
-            //                 case 0: {/* INC rp[p] */} break;
-            //                 case 1: {/* DEC rp[p] */} break;
-            //             }
-            //         } break;
+                    // 16-bit INC/DEC
+                    case 3: {
+                        // from the manual: should not change any flags
+                        switch (q) {
+                            /* INC rp[p] */
+                            case 0: {(*rp[p])++;} break;
+                            /* DEC rp[p] */
+                            case 1: {(*rp[p])--;} break;
+                        }
+                    } break;
             //         // 8-bit INC
             //         case 4: {/* INC r[y] */} break;
             //         // 8-bit DEC
@@ -532,9 +535,9 @@ namespace CPU
             // case 1: {
             // } break;
             case 2: {
-                /* Arithmetic / logic operations */
+                /* Arithmetic / logic operations -- ALU */
                 alu[y](r[z]);
-                cyc+=z == 6 ? 1 : 0;
+                cyc+=z == 6 ? 1 : 0; // if register is u16 (HL)
             } break;
             case 3: {
                 switch (z) {
