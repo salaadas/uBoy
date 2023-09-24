@@ -14,13 +14,14 @@
  *
  * - Load ROMS
  * - Read|Write bytes
- * @ Cpu opcodes
+ * @ Cpu opcodes -> [current: 8 bit loading]
+ * ^ Interrupts, and fix the infinite loop
  * - Accurate Timing
- * - Rendering
+ * - PPU
  * - APU
  */
 
-// Will delete later
+// Will delete later (when, I finish the PPU)
 using namespace std;
 using namespace std::placeholders;
 
@@ -264,7 +265,7 @@ namespace CPU
     }
 
     void aluADCA(u8 value) {
-        u16 carry   = (registers.F & FLAG_C) ? 1 : 0;
+        u16 carry   = !!(registers.F & FLAG_C);
         u16 r       = (u16)registers.A + (u16)value + carry;
         registers.A = (r & 0xFF);
         // set if result == 0                  // reset
@@ -290,7 +291,7 @@ namespace CPU
     void aluSBCA(u8 value) {
         int16_t s_A   = (int16_t)registers.A,
                 s_v   = (int16_t)value,
-                carry = (registers.F & FLAG_C) ? 1 : 0;
+                carry = !!(registers.F & FLAG_C);
         int16_t r     = s_A - s_v - carry;
         registers.A   = (u8)(r & 0xFF);
         // set if result == 0                  // set to true
@@ -396,6 +397,10 @@ namespace CPU
         set_flag(FLAG_H, false); // half-carry will always be cleared
     }
 
+    void ret(bool cc) {
+
+    }
+
     template<bool write> unsigned MemAccess(u16 addr, u8 v) {
         tick();
         // macros??
@@ -498,7 +503,7 @@ namespace CPU
             &registers.BC, &registers.DE, &registers.HL, &registers.AF
         };
 
-        // to get the flags, we do i.e. registers.F & FLAG_Z
+        // to know the if the flags are set, we do i.e. !!(registers.F & FLAG_Z)
         // table "cc" (indexed 0)
         // NZ Z NC C
         // ^    ^
@@ -593,17 +598,21 @@ namespace CPU
                     // 8-bit INC
                     case 4: {
                         /* INC r[y] */
-                        *(std::get<y>(r))++; cyc+=y==6 ? 2 : 0;
+                        *(std::get<y>(r))++; cyc+=(y==6)*2;
                     } break;
                     // 8-bit DEC
                     case 5: {
                         /* DEC r[y] */
-                        *(std::get<y>(r))--; cyc+=y==6 ? 2 : 0;
+                        *(std::get<y>(r))--; cyc+=(y==6)*2;
                     } break;
                     // 8-bit load immediate
                     /* LD r[y], n */
                     case 6: {
-                        load8bit((std::get<y>(r)), ft(1)); cyc+=y==6 ? 2 : 1;
+                        if (y==6) {
+                            WB(*std::get<y>(r), ft(1)); cyc+=2;
+                        } else {
+                            load8bit(std::get<y>(r), ft(1)); cyc+=1;
+                        }
                     } break;
                     // operations on [accumulators | flags]
                     case 7: {
@@ -628,28 +637,87 @@ namespace CPU
                                 /* DAA */
                                 daa(); cyc+=0;
                             } break;
-                            case 5: {/* CPL */} break;
-                            case 6: {/* SCF */} break;
-                            case 7: {/* CCF */} break;
+                            case 5: {
+                                /* CPL */
+                                registers.A = ~registers.A;
+                                set_flag(FLAG_N, true);
+                                set_flag(FLAG_H, true);
+                                cyc+=0;
+                            } break;
+                            case 6: {
+                                /* SCF */
+                                set_flag(FLAG_N, false);
+                                set_flag(FLAG_H, false);
+                                set_flag(FLAG_C, true);
+                                cyc+=0;
+                            } break;
+                            case 7: {
+                                /* CCF */
+                                set_flag(FLAG_N, false);
+                                set_flag(FLAG_H, false);
+                                set_flag(FLAG_C, !(registers.F & FLAG_C));
+                                cyc+=0;
+                            } break;
                         }
                     } break;
                 }                              // end of z swich-case
             } break;                           // end of case x == 0
             case 1: {                          // begin of case x == 1
+                if (z==6 && y==6) {
+                    /* HALT */
+                    if (interrupts.IF & interrupts.IE) registers.PC--;
+                } else {
+                    /* 8-bit loading (but with registers) */
+                    if (y==6)
+                        WB(*std::get<y>(r), *std::get<z>(r));
+                    else if (z==6)
+                        load8bit(std::get<y>(r), RB(*std::get<z>(r)));
+                    else
+                        load8bit(std::get<y>(r), *std::get<z>(r));
+                    cyc+=(z==6 || y==6);
+                }
             } break;                           // end of case x == 1
             case 2: {
                 /* Arithmetic / logic operations -- ALU */
-                alu[y](*(std::get<z>(r)));
+                alu[y](*std::get<z>(r));
                 // if register is u16 (HL)
-                cyc+=z == 6 ? 1 : 0;
+                cyc+=(z==6);
             } break;                           // end of case x == 2
             case 3: {
                 switch (z) {
+                    /* Conditional return, mem-mapped register loads and stack operations */
+                    case 0: {
+                        switch (y) {
+                            case 0: case 1: case 2:
+                            case 3: {ret(cc[y]); cyc+=1;} break;
+                            // LDH (n), A
+                            case 4: {WB(0xFF00+ft(1), registers.A); cyc+=2;} break;
+                            // ADD SP, n
+                            case 5: {
+                                int16_t s_v = (int16_t) (int8_t) ft(1),
+                                        res = (u16) ((int16_t)registers.SP + s_v);
+                                set_flag(FLAG_Z, false);
+                                set_flag(FLAG_N, false);
+                                set_flag(FLAG_H, (res & 0xF)  < (registers.SP & 0xF));
+                                set_flag(FLAG_C, (res & 0xFF) < (registers.SP & 0xFF));
+                                registers.SP = res;
+                                cyc+=3;
+                            } break;
+                            // LDH A, (n)
+                            case 6: {registers.A = RB(0xFF00+ft(1)); cyc+=2;} break;
+                        }
+                    } break;
+                    case 1: break;
+                    case 2: break;
                     case 3: {
                         switch (y) {
                             case 0: {jp(ft(2)); cyc+=3;} break;
                         }
                     } break;
+                    case 4: break;
+                    case 5: break;
+                    case 6: break;
+                    case 7: break;
                 }                              // end of z switch-case
             } break;                           // end of case x == 3
             // end of all x switch-cases
@@ -680,10 +748,6 @@ namespace CPU
         // i[op]();
         i[0x3C]();
     }
-}
-
-void hello(string s1, string s2, string s3) {
-    cout << s1 << " " << s2 << endl;
 }
 
 int main()
