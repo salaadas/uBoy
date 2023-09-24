@@ -3,7 +3,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <iostream>
+#include <tuple>
 #include <string>
 #include <vector>
 
@@ -20,6 +22,7 @@
 
 // Will delete later
 using namespace std;
+using namespace std::placeholders;
 
 // Shorthands
 // *********************************
@@ -30,7 +33,7 @@ using namespace std;
 
 // Flags
 // *********************************
-#define FLAG_Z (1 << 7)
+#define FLAG_Z    (1 << 7) // Zero flag
 #define FLAG_N    (1 << 6) // Subtraction flag
 #define FLAG_H    (1 << 5) // Half carry flag
 #define FLAG_C    (1 << 4) // Carry flag
@@ -209,23 +212,31 @@ namespace CPU
         if (t) registers.F |= flag;
         else registers.F &= ~(flag);
     }
+
     // http://marc.rawer.de/Gameboy/Docs/GBCPUman.pdf
     void nop() {}
+
     void stop() {/* if (!interrupts.FJoypad) registers.PC--; */}
     // put value nn into addr
     void writeu16(u16 addr, u16 nn) {
         WB(addr, (u8)(nn & 0xFF));
         WB(addr, (u8)(nn >> 8));
     }
+
     void load16bit(u16 *addr, u16 nn) {*addr = nn;}
+
+    template<typename T> // T is usually u8, with the exception of HL being u16 (see table r)
+    void load8bit(T *addr, u8 n) {*addr = n;}
+
     // jump -127 -> +129 steps from the current address
     void jr(u8 d) {
-        int32_t sd = (int32_t)d;
-        registers.PC += sd;
+        registers.PC += (int8_t)d;
     }
+
     void jp(u16 nn) {
         registers.PC = nn;
     }
+
     void add16(u16 target, u16 value) {
         int r = target + value;
         set_flag(FLAG_N, false);
@@ -234,6 +245,7 @@ namespace CPU
         // set if carry on bit 15
         set_flag(FLAG_C, r > 0xFFFF);
     }
+
     void addhl(u16 *val) {
         u16 r = registers.HL + *val;
         add16(registers.HL, *val);
@@ -250,6 +262,7 @@ namespace CPU
         set_flag(FLAG_C, r > 0xFF);            set_flag(FLAG_H, ((registers.A & 0xF) +
                                                                  (value & 0xF)) > 0xF);
     }
+
     void aluADCA(u8 value) {
         u16 carry   = (registers.F & FLAG_C) ? 1 : 0;
         u16 r       = (u16)registers.A + (u16)value + carry;
@@ -261,6 +274,7 @@ namespace CPU
                                                                  (value + 0xF) +
                                                                  (u8)carry) > 0xF);
     }
+
     void aluSUB(u8 value) {
         int16_t s_A = (int16_t)registers.A,
                 s_v = (int16_t)value;
@@ -272,6 +286,7 @@ namespace CPU
         set_flag(FLAG_C, r<0);                 set_flag(FLAG_H, ((s_A & 0xF) -
                                                                  (s_v & 0xF)) < 0);
     }
+
     void aluSBCA(u8 value) {
         int16_t s_A   = (int16_t)registers.A,
                 s_v   = (int16_t)value,
@@ -284,6 +299,7 @@ namespace CPU
         set_flag(FLAG_C, r<0);                 set_flag(FLAG_H, ((s_A & 0xF) -
                                                                  (s_v & 0xF) - carry) < 0);
     }
+
     void aluAND(u8 value) {
         registers.A &= value;
         set_flag(FLAG_Z, registers.A==0);
@@ -291,6 +307,7 @@ namespace CPU
         set_flag(FLAG_H, true);
         set_flag(FLAG_C, false);
     }
+
     void aluXOR(u8 value) {
         registers.A ^= value;
         set_flag(FLAG_Z, registers.A==0);
@@ -298,6 +315,7 @@ namespace CPU
         set_flag(FLAG_H, false);
         set_flag(FLAG_C, false);
     }
+
     void aluOR(u8 value) {
         registers.A |= value;
         set_flag(FLAG_Z, registers.A==0);
@@ -305,6 +323,7 @@ namespace CPU
         set_flag(FLAG_H, false);
         set_flag(FLAG_C, false);
     }
+
     // Compare A with n; This is basically a A - n subtraction but the results are thrown away
     void aluCP(u8 value) {
         int16_t r = registers.A - value;
@@ -314,15 +333,77 @@ namespace CPU
         set_flag(FLAG_C, r<0);
     }
 
+    template<typename T>
+    void rl(T *target, bool carry) {
+        bool bit7 = (*target & 0x80) != 0;
+        *target <<= 1;
+        *target |= carry ? registers.F&FLAG_C : bit7;
+        set_flag(FLAG_Z, *target==0);
+        set_flag(FLAG_N, false);
+        set_flag(FLAG_H, false);
+        set_flag(FLAG_C, bit7);
+    }
+
+    template<typename T>
+    void rr(T *target, bool carry) {
+        bool bit1 = (*target & 0x1) != 0;
+        *target >>= 1;
+        *target |= carry ? (registers.F&FLAG_C)<<7 : bit1<<7;
+        set_flag(FLAG_Z, *target==0);
+        set_flag(FLAG_N, false);
+        set_flag(FLAG_H, false);
+        set_flag(FLAG_C, bit1!=0);
+    }
+
+    // Decimal adjust register A.
+    // This instruction adjusts register A so that the
+    // correct representation of Binary Coded Decimal (BCD)
+    // is obtained.
+    //
+    // very confusing, I had to lookup different implementations
+    // for this:
+    // - https://github.com/ChanellR/Fatboy/blob/master/src/cpu.c#L396
+    // - https://github.com/mattbruv/Gameboy-Emulator/blob/master/src/cpu.cpp#L750
+    void daa() {
+        int8_t additive = 0; u8 done = 0;
+
+        if (!(registers.F & FLAG_N)) {
+            // after an addition, adjust if (half-)carry occurred or if result
+            // is out of bounds
+            if ((registers.A & 0xF0)>0x80 && (registers.A & 0xF0)>0x9) {
+                additive+=0x66;
+                done     = 1;
+                set_flag(FLAG_C, true);
+            }
+            if ((registers.F & FLAG_C || (registers.A & 0xF0)>0x90) && !done) {
+                additive+=0x60;
+                set_flag(FLAG_C, true);
+            }
+            if ((registers.F & FLAG_H || (registers.A & 0x0F)>0x09) && !done)
+                additive+=0x06;
+        } else {
+            // after a subtraction, only adjust if (half-)carry occurred
+            if (registers.F & FLAG_C)
+                additive-=0x60;
+            if (registers.F & FLAG_H)
+                additive-=0x06;
+            if (additive<=-0x60)
+                set_flag(FLAG_C, true);
+        }
+        registers.A+=additive;
+
+        set_flag(FLAG_Z, registers.A==0);
+        set_flag(FLAG_H, false); // half-carry will always be cleared
+    }
+
     template<bool write> unsigned MemAccess(u16 addr, u8 v) {
         tick();
         // macros??
-
         #define writeOrRet(what) u8 &r = what; if (!write) return r; r=v
         if (addr <= 0x3FFF) {
             writeOrRet(Cartridge::ROM[addr]);
             printf("WARNING: Just wrote %d @ %04X\n", v, addr);
-            exit(1);}
+            /*exit(1);*/}
         else if (addr <= 0x7FFF) {
             writeOrRet(Cartridge::ROM[addr]);
             printf("WARNING: Just wrote %d @ %04X\n", v, addr);
@@ -404,10 +485,10 @@ namespace CPU
         // parsing by components:
         // https://gb-archive.github.io/salvage/decoding_gbz80_opcodes/Decoding%20Gamboy%20Z80%20Opcodes.html
 
-        static unsigned r[8] = {
-            registers.B, registers.C, registers.D,  registers.E,
-            registers.H, registers.L, registers.HL, registers.A
-        };
+        static std::tuple<u8*,u8*,u8*,u8*,u8*,u8*,u16*,u8*> r = std::make_tuple(
+                            &registers.B, &registers.C, &registers.D,  &registers.E,
+                  &registers.H, &registers.L, &registers.HL, &registers.A
+        );
 
         static u16 *rp[4] = {
             &registers.BC, &registers.DE, &registers.HL, &registers.SP
@@ -425,8 +506,8 @@ namespace CPU
         // Not zero
 
         static bool cc[4] = {
-            (registers.F & FLAG_Z)==0, (registers.F & FLAG_Z)!=0,
-            (registers.F & FLAG_C)==0, (registers.F & FLAG_C)!=0
+            (registers.F & FLAG_Z)!=0, (registers.F & FLAG_Z)==0,
+            (registers.F & FLAG_C)!=0, (registers.F & FLAG_C)==0
         };
 
         // table alu
@@ -436,10 +517,10 @@ namespace CPU
 
         // table rot
 
-        unsigned x = op>>6, y = (op>>3)&7, z = op&7, p = y>>1, q = y%2;
+        enum { x = op>>6, y = (op>>3)&7, z = op&7, p = y>>1, q = y%2 };
         unsigned cyc = 1; // machine cycles, T-states = machine cycles * 4
         switch (x) {
-            // begin x switch-case
+            // begin all x switch cases
             case 0: {
                 // begin z switch-case
                 switch (z) {
@@ -456,6 +537,7 @@ namespace CPU
                             jr8:
                             case 3: {jr(ft(1)); cyc+=2;} break;
                             case 4: case 5: case 6:
+                            // TODO: Fix this because it is wrong
                             /* JR cc[y-4], d */
                             case 7: {cyc+=1; if (!cc[y-4]) return; goto jr8;} break;
                         }
@@ -495,7 +577,7 @@ namespace CPU
                                 }
                                 registers.A = rval;
                                 cyc+=1;
-                            }
+                            } break;
                         }
                     } break;
                     // 16-bit INC/DEC
@@ -503,42 +585,64 @@ namespace CPU
                         // from the manual: should not change any flags
                         switch (q) {
                             /* INC rp[p] */
-                            case 0: {(*rp[p])++;} break;
+                            case 0: {(*rp[p])++; cyc+=1;} break;
                             /* DEC rp[p] */
-                            case 1: {(*rp[p])--;} break;
+                            case 1: {(*rp[p])--; cyc+=1;} break;
                         }
                     } break;
-            //         // 8-bit INC
-            //         case 4: {/* INC r[y] */} break;
-            //         // 8-bit DEC
-            //         case 5: {/* DEC r[y] */} break;
-                    // 8-bit load immediate
-                    case 6: {
-                        /* LD r[y], n */
-                        printf("hey\n");
+                    // 8-bit INC
+                    case 4: {
+                        /* INC r[y] */
+                        *(std::get<y>(r))++; cyc+=y==6 ? 2 : 0;
                     } break;
-            //         // operations on [accumulators | flags]
-            //         case 7: {
-            //             switch (y) {
-            //                 case 0: {/* RLCA */} break;
-            //                 case 1: {/* RRCA */} break;
-            //                 case 2: {/* RLA */} break;
-            //                 case 3: {/* RRA */} break;
-            //                 case 4: {/* DAA */} break;
-            //                 case 5: {/* CPL */} break;
-            //                 case 6: {/* SCF */} break;
-            //                 case 7: {/* CCF */} break;
-            //             }
-            //         } break;
-                } // end of z swich-case
-            } break; // end of case x == 0
-            // case 1: {
-            // } break;
+                    // 8-bit DEC
+                    case 5: {
+                        /* DEC r[y] */
+                        *(std::get<y>(r))--; cyc+=y==6 ? 2 : 0;
+                    } break;
+                    // 8-bit load immediate
+                    /* LD r[y], n */
+                    case 6: {
+                        load8bit((std::get<y>(r)), ft(1)); cyc+=y==6 ? 2 : 1;
+                    } break;
+                    // operations on [accumulators | flags]
+                    case 7: {
+                        switch (y) {
+                            case 0: {
+                                /* RLCA */
+                                rl(std::get<7>(r), false); cyc+=0;
+                            } break;
+                            case 1: {
+                                /* RRCA */
+                                rr(std::get<7>(r), false); cyc+=0;
+                            } break;
+                            case 2: {
+                                /* RLA */
+                                rl(std::get<7>(r), true); cyc+=0;
+                            } break;
+                            case 3: {
+                                /* RRA */
+                                rr(std::get<7>(r), true); cyc+=0;
+                            } break;
+                            case 4: {
+                                /* DAA */
+                                daa(); cyc+=0;
+                            } break;
+                            case 5: {/* CPL */} break;
+                            case 6: {/* SCF */} break;
+                            case 7: {/* CCF */} break;
+                        }
+                    } break;
+                }                              // end of z swich-case
+            } break;                           // end of case x == 0
+            case 1: {                          // begin of case x == 1
+            } break;                           // end of case x == 1
             case 2: {
                 /* Arithmetic / logic operations -- ALU */
-                alu[y](r[z]);
-                cyc+=z == 6 ? 1 : 0; // if register is u16 (HL)
-            } break;
+                alu[y](*(std::get<z>(r)));
+                // if register is u16 (HL)
+                cyc+=z == 6 ? 1 : 0;
+            } break;                           // end of case x == 2
             case 3: {
                 switch (z) {
                     case 3: {
@@ -546,9 +650,9 @@ namespace CPU
                             case 0: {jp(ft(2)); cyc+=3;} break;
                         }
                     } break;
-                } // end of z switch-case
-            } break;
-            // end of x switch-case
+                }                              // end of z switch-case
+            } break;                           // end of case x == 3
+            // end of all x switch-cases
             default: {
                 printf("ERROR: opcode 0x%02X is unimplemented\n", op);
                 printf("TRACE: was called @ addr 0x%04X\n", registers.PC-1);
@@ -573,8 +677,13 @@ namespace CPU
         #undef o
         #undef c
 
-        i[op]();
+        // i[op]();
+        i[0x3C]();
     }
+}
+
+void hello(string s1, string s2, string s3) {
+    cout << s1 << " " << s2 << endl;
 }
 
 int main()
@@ -628,8 +737,10 @@ int main()
     //     printf("0x%02X\t0x%04X\n", Cartridge::ROM[i], i);
     // }
 
-    for (;;)
+    // for (;;)
+    printf("a: %X\n", CPU::registers.A);
     CPU::Op();
+    printf("a: %X\n", CPU::registers.A);
 
     return(0);
 }
