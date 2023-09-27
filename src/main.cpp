@@ -1,30 +1,26 @@
-#include <any>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
-#include <functional>
 #include <iostream>
-#include <tuple>
 #include <string>
 #include <vector>
 
 /*
  * LOGS:
- *
  * - Load ROMS
  * - Read|Write bytes
- * @ Cpu opcodes -> [current: 8 bit loading]
- * ^ Interrupts, and fix the infinite loop
- * - Accurate Timing
+ * - Cpu opcodes
+ * @ Interrupts, and fix the infinite loop
  * - PPU
+ * - Blargg's tests
+ * - Accurate Timing
  * - APU
  */
 
 // Will delete later (when, I finish the PPU)
 using namespace std;
-using namespace std::placeholders;
 
 // Shorthands
 // *********************************
@@ -218,7 +214,7 @@ namespace CPU
     // http://marc.rawer.de/Gameboy/Docs/GBCPUman.pdf
     void nop() {}
 
-    void stop() {/* if (!interrupts.FJoypad) registers.PC--; */}
+    void stop() {if (!interrupts.FJoypad) registers.PC--;}
     // put value nn into addr
     void writeu16(u16 addr, u16 nn) {
         WB(addr, (u8)(nn & 0xFF));
@@ -494,7 +490,7 @@ namespace CPU
             exit(1);}
         else if (addr <= 0xDFFF) {
             fprintf(stderr, "ERROR: WRAM is unimplemented (@ 0x%04X)\n", addr);
-            exit(1);}
+            /*exit(1);*/}
         else if (0xFE00 <= addr && addr <= 0xFE9F) {
             writeOrRet(PPU::OAM[addr - 0XFE00]);}
         else if (addr <= 0xFEFF) {
@@ -560,7 +556,7 @@ namespace CPU
     // Explanation for Bisqwit: https://www.maizure.org/projects/decoded-bisqwit-nes-emulator/nesemu1_decoded.txt
     // BASE64 Encoder:          https://cryptii.com/pipes/base64-to-hex
     template<u8 op>
-    void Ins() {
+    unsigned Ins() {
         // parsing by components:
         // https://gb-archive.github.io/salvage/decoding_gbz80_opcodes/Decoding%20Gamboy%20Z80%20Opcodes.html
 
@@ -633,7 +629,7 @@ namespace CPU
                             case 4: case 5: case 6:
                             // TODO: Fix this because it is wrong
                             /* JR cc[y-4], d */
-                            case 7: {cyc+=1; if (!cc[y-4]) return; goto JR8;} break;
+                            case 7: {cyc+=1; if (!cc[y-4]) break; goto JR8;} break;
                         }
                     } break;
                     // 16-bit [load immediate | add]
@@ -980,25 +976,121 @@ namespace CPU
                 exit(1);
             }
         }
+        return cyc;
     }
+
+    constexpr int CLOCKSPEED     = 4194304;
+    static    int dividerCounter = 256;
+    static    int timerCounter   = CLOCKSPEED / 4096;
+    void UpdateDivider(int cycles) {
+        dividerCounter -= cycles;
+        if (dividerCounter <= 0) {
+            int overflow = (-1 * dividerCounter);
+            dividerCounter = 0;
+            dividerCounter -= overflow;
+            if (timer.DIV == 255) {
+                timer.DIV++;
+                printf("Timer wraps around\n");
+            } else {
+                timer.DIV++;
+            }
+        }
+    }
+
+    void RequestInterrupt(int val) {
+        printf("Request interrupt: %d\n", val);
+        switch (val) {
+            case 0: {interrupts.FVBLANK = 1;} break;
+            case 1: {interrupts.FLCD    = 1;} break;
+            case 2: {interrupts.FTimer  = 1;} break;
+            case 3: {interrupts.FSerial = 1;} break;
+            case 4: {interrupts.FJoypad = 1;} break;
+        }
+    }
+
+    void UpdateTiming(int cycles) {
+        UpdateDivider(cycles);
+
+        auto getFrequency = []() {
+            // https://gbdev.io/pandocs/Timer_and_Divider_Registers.html?highlight=16384#ff07--tac-timer-control
+            switch (timer.TAC & 0x03) {
+                case 0: return 4096;
+                case 1: return 262144;
+                case 2: return 65536;
+                case 3: return 16384;
+                default: {
+                    fprintf(stderr, "ERROR: TAC does not equate to any defined frequencies\n");
+                    exit(1);
+                }
+            }
+        };
+
+        // Check if clock is enabled
+        if (timer.TAC & 0x04) {
+            timerCounter -= cycles; // T states
+            if (timerCounter <= 0) {
+                int overflow = (-1 * timerCounter);
+                timerCounter = CLOCKSPEED / getFrequency();
+                timerCounter -= overflow;
+                if (timer.TIMA == 255) {
+                    timer.TIMA = timer.TMA;
+                    RequestInterrupt(2);
+                } else {
+                    timer.TIMA++;
+                }
+            }
+        }
+    }
+
+    void HandleInterrupt() {
+        // https://gbdev.io/pandocs/Interrupt_Sources.html
+        u8 addrs[5] = {0x40, 0x48, 0x50, 0x58, 0x60};
+
+        if (interrupts.IME == 1) {
+            if (interrupts.IF) {
+                for (int i = 0; i < 5; ++i) {
+                    if ((interrupts.IF & (1<<i)) & interrupts.IE) {
+                        interrupts.IF ^= (1<<i);
+                        call(addrs[i]);
+                        interrupts.IME = 0;
+                    }
+                }
+            }
+        }
+    }
+
     // this would be the ``loop''
     void Op() {
-        unsigned op = RB(registers.PC++);
-        printf("PC: 0x%04X\t\tExecuting: 0x%02X\n", registers.PC-1, op);
+        if (!Cartridge::loaded) {
+            fprintf(stderr, "Must load ROM before executing anything\n");
+            exit(1);
+        }
 
-        // Today I learned about the paste operator a.k.a. ## in c++
-        #define c(n) Ins<0x##n>, Ins<0x##n+1>,
-        #define o(n) c(n)c(n+2)c(n+4)c(n+6)
-        static void (*i[0x108])() = {
-            o(00)o(08)o(10)o(18)o(20)o(28)o(30)o(38)
-            o(40)o(48)o(50)o(58)o(60)o(68)o(70)o(78)
-            o(80)o(88)o(90)o(98)o(A0)o(A8)o(B0)o(B8)
-            o(C0)o(C8)o(D0)o(D8)o(E0)o(E8)o(F0)o(F8)
-        };
-        #undef o
-        #undef c
+        constexpr int MAXCYCLES = 69905;
+        unsigned int totalCyc = 0;
 
-        i[op]();
+        while (totalCyc < MAXCYCLES) {
+            unsigned op = RB(registers.PC++);
+            printf("PC: 0x%04X\t\tExecuting: 0x%02X\n", registers.PC-1, op);
+
+            // Today I learned about the paste operator a.k.a. ## in c++
+            #define c(n) Ins<0x##n>, Ins<0x##n+1>,
+            #define o(n) c(n)c(n+2)c(n+4)c(n+6)
+            static unsigned (*i[0x108])() = {
+                o(00)o(08)o(10)o(18)o(20)o(28)o(30)o(38)
+                o(40)o(48)o(50)o(58)o(60)o(68)o(70)o(78)
+                o(80)o(88)o(90)o(98)o(A0)o(A8)o(B0)o(B8)
+                o(C0)o(C8)o(D0)o(D8)o(E0)o(E8)o(F0)o(F8)
+            };
+            #undef o
+            #undef c
+
+            int cycles = i[op]() * 4;
+            totalCyc += cycles;
+
+            UpdateTiming(cycles);
+            HandleInterrupt();
+        }
     }
 }
 
