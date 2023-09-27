@@ -469,6 +469,12 @@ namespace CPU
         *target = (~(1<<index) & *target);
     }
 
+    void call(u16 value) {
+        WB(--(registers.SP), (u8)(registers.PC >> 8));
+        WB(--(registers.SP), registers.PC & 0xFF);
+        registers.PC = value;
+    }
+
     template<bool write> unsigned MemAccess(u16 addr, u8 v) {
         tick();
         // macros??
@@ -906,23 +912,62 @@ namespace CPU
                                              dq = y%2;
                                 switch (dx) {
                                     case 0: {
-                                        rot[dy]((u8*)r[dz]);
-                                        cyc+=(dz==6)*2 + 1;
+                                        if (dz==6) {
+                                            u8 t = RB(*(u16*)r[dz]); rot[dy](&t);
+                                            WB(*(u16*)r[dz], t); cyc+=3;
+                                        } else {rot[dy]((u8*)r[dz]); cyc+=1;}
+                                    } break;
+                                    case 1: {
+                                        if (dz==6) {
+                                            cbBIT(RB(*(u16*)r[dz]), dy); cyc+=3;
+                                        } else {cbBIT(*(u8*)r[dz], dy); cyc+=1;}
+                                    } break;
+                                    case 2: {
+                                        if (dz==6) {
+                                            u8 t = RB(*(u16*)r[dz]); cbRES(&t, dy);
+                                            WB(*(u16*)r[dz], t); cyc+=3;
+                                        } else {cbRES((u8*)r[dz], dy); cyc+=1;}
+                                    } break;
+                                    case 3: {
+                                        if (dz==6) {
+                                            u8 t = RB(*(u16*)r[dz]); cbSET(&t, dy);
+                                            WB(*(u16*)r[dz], t); cyc+=3;
+                                        } else {cbSET((u8*)r[dz], dy); cyc+=1;}
                                     } break;
                                 }
                             } break;
-                            case 6: {
-
+                            case 6: {interrupts.IME = false; cyc+=0;} break;
+                            case 7: {interrupts.IME = true; cyc+=0;} break;
+                        }
+                    } break;
+                    case 4: {
+                        switch (y) {
+                            case 0: case 1: case 2:
+                            case 3: {
+                                if (cc[y]) {call(ft(2)); cyc+=5;}
+                                else {cyc+=2;}
                             } break;
-                            case 7: {
-
+                        }
+                    };
+                    case 5: {
+                        switch (q) {
+                            case 0: {
+                                u16 t = *rp2[p];
+                                WB(--(registers.SP), (u8)(t >> 8));
+                                WB(--(registers.SP), t & 0xFF);
+                                cyc+=3;
+                            } break;
+                            case 1: {
+                                if (p == 0) {call(ft(2)); cyc+=5;}
                             } break;
                         }
                     } break;
-                    case 4: break;
-                    case 5: break;
-                    case 6: break;
-                    case 7: break;
+                    case 6: {alu[y](ft(1)); cyc+=1;} break;
+                    case 7: {
+                        WB(--(registers.SP), registers.PC >> 8);
+                        WB(--(registers.SP), registers.PC & 0xFF);
+                        cyc+=3;
+                    } break;
                 }                              // end of z switch-case
             } break;                           // end of case x == 3
             // end of all x switch-cases
