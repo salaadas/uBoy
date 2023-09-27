@@ -611,6 +611,7 @@ namespace CPU
         };
 
         enum { x = op>>6, y = (op>>3)&7, z = op&7, p = y>>1, q = y%2 };
+        // printf("x: %d\t\ty: %d\t\tz: %d\t\tp: %d\t\tq: %d\n", x, y, z, p, q);
         unsigned cyc = 1; // machine cycles, T-states = machine cycles * 4
         switch (x) {
             // begin all x switch cases
@@ -901,7 +902,9 @@ namespace CPU
                     case 3: {
                         switch (y) {
                             /* JP nn */
-                            case 0: {jp(ft(2)); cyc+=3;} break;
+                            case 0: {
+                                jp(ft(2)); cyc+=3;
+                            } break;
                             /* (CB prefix) */
                             case 1: {
                                 const u8 displacement = ft(1);
@@ -995,8 +998,7 @@ namespace CPU
         #undef o
         #undef c
 
-        // i[op]();
-        i[0x3C]();
+        i[op]();
     }
 }
 
@@ -1051,10 +1053,8 @@ int main()
     //     printf("0x%02X\t0x%04X\n", Cartridge::ROM[i], i);
     // }
 
-    // for (;;)
-    printf("a: %X\n", CPU::registers.A);
-    CPU::Op();
-    printf("a: %X\n", CPU::registers.A);
-
+    for (;;) {
+        CPU::Op();
+    }
     return(0);
 }
