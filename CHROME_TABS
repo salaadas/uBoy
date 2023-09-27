@@ -1,0 +1,25 @@
+Tabs that I open when working on this project:
+
+Gameboy manual:
+- http://marc.rawer.de/Gameboy/Docs/GBCPUman.pdf
+
+Opcodes table:
+- https://www.pastraiser.com/cpu/gameboy/gameboy_opcodes.html
+
+C++ operators precedence:
+- https://en.cppreference.com/mwiki/index.php?title=cpp/language/operator_precedence
+
+Grouping Z80 opcodes:
+- https://gb-archive.github.io/salvage/decoding_gbz80_opcodes/Decoding%20Gamboy%20Z80%20Opcodes.html
+- https://i.imgur.com/gJBExn8.png (For knowing which one is which)
+
+Fatboy's github:
+- https://github.com/ChanellR/Fatboy/blob/master/src/cpu.c
+
+Gameboy-Emulator's github:
+- https://github.com/mattbruv/Gameboy-Emulator/blob/master/src/cpu.cpp
+- https://github.com/mattbruv/Gameboy-Emulator/blob/master/src/opcodes.cpp  
+
+Writing the other parts:
+- https://blog.tigris.fr/2019/10/30/writing-an-emulator-the-first-real-pixel/
+- https://realboyemulator.wordpress.com/2013/01/08/emulating-the-core-1/

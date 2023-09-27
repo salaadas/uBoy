@@ -1,3 +1,4 @@
+#include <any>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -334,8 +335,7 @@ namespace CPU
         set_flag(FLAG_C, r<0);
     }
 
-    template<typename T>
-    void rl(T *target, bool carry) {
+    void rl(u8 *target, bool carry) {
         bool bit7 = (*target & 0x80) != 0;
         *target <<= 1;
         *target |= carry ? registers.F&FLAG_C : bit7;
@@ -345,8 +345,7 @@ namespace CPU
         set_flag(FLAG_C, bit7);
     }
 
-    template<typename T>
-    void rr(T *target, bool carry) {
+    void rr(u8 *target, bool carry) {
         bool bit1 = (*target & 0x1) != 0;
         *target >>= 1;
         *target |= carry ? (registers.F&FLAG_C)<<7 : bit1<<7;
@@ -397,8 +396,77 @@ namespace CPU
         set_flag(FLAG_H, false); // half-carry will always be cleared
     }
 
-    void ret(bool cc) {
+    void ret() {
+        u16 lo = (u16)RB(registers.SP++);
+        u16 hi = (u16)RB(registers.SP++);
+        registers.PC = (hi << 0xF) | lo;
+    }
 
+    void cbRLC(u8 *target) {rl(target, false);}
+
+    void cbRRC(u8 *target) {rr(target, false);}
+
+    void cbRL(u8 *target) {rl(target, true);}
+
+    void cbRR(u8 *target) {rr(target, true);}
+
+    void cbSLA(u8 *target) {
+        u8 r = *target << 1;
+        set_flag(FLAG_Z, r==0);
+        set_flag(FLAG_N, false);
+        set_flag(FLAG_H, false);
+        set_flag(FLAG_C, (*target & 0x80) != 0);
+        *target = r;
+    }
+
+    void cbSR(u8 *target, bool includeTopBit) {
+        bool isTopBitSet = *target & 0x80;
+        u8 r;
+        if (includeTopBit) {
+            r = isTopBitSet ? *target>>1 | 0x80 : *target>>1;
+        } else {
+            r = *target>>1;
+        }
+        set_flag(FLAG_Z, r==0);
+        set_flag(FLAG_N, false);
+        set_flag(FLAG_H, false);
+        set_flag(FLAG_C, (*target & 0x01) != 0);
+        *target = r;
+    }
+
+    void cbSRA(u8 *target) {
+        cbSR(target, true);
+    }
+
+    void cbSRL(u8 *target) {
+        cbSR(target, false);
+    }
+
+    void cbSWAP(u8 *target) {
+        u8 first = *target>>4,
+        second = *target<<4;
+
+        u8 swapped = first | second;
+        *target = swapped;
+
+        set_flag(FLAG_Z, *target==0);
+        set_flag(FLAG_N, false);
+        set_flag(FLAG_H, false);
+        set_flag(FLAG_C, false);
+    }
+
+    void cbBIT(u8 target, u8 index) {
+        set_flag(FLAG_Z, ((1<<index) & ~target) != 0);
+        set_flag(FLAG_H, true);
+        set_flag(FLAG_N, false);
+    }
+
+    void cbSET(u8 *target, u8 index) {
+        *target = (*target | (1<<index));
+    }
+
+    void cbRES(u8 *target, u8 index) {
+        *target = (~(1<<index) & *target);
     }
 
     template<bool write> unsigned MemAccess(u16 addr, u8 v) {
@@ -490,10 +558,21 @@ namespace CPU
         // parsing by components:
         // https://gb-archive.github.io/salvage/decoding_gbz80_opcodes/Decoding%20Gamboy%20Z80%20Opcodes.html
 
-        static std::tuple<u8*,u8*,u8*,u8*,u8*,u8*,u16*,u8*> r = std::make_tuple(
-                            &registers.B, &registers.C, &registers.D,  &registers.E,
-                  &registers.H, &registers.L, &registers.HL, &registers.A
-        );
+        // static std::tuple<u8*,u8*,u8*,u8*,u8*,u8*,u16*,u8*> r = std::make_tuple(
+        //    &registers.B, &registers.C, &registers.D,  &registers.E,
+        //    &registers.H, &registers.L, &registers.HL, &registers.A
+        // );
+
+        // everything should be u8*, except for registers.HL
+        void *r[] = {
+           &registers.B, &registers.C, &registers.D,  &registers.E,
+           &registers.H, &registers.L, &registers.HL, &registers.A
+        };
+
+        // static std::vector<std::any> r = {
+        //    &registers.B, &registers.C, &registers.D,  &registers.E,
+        //    &registers.H, &registers.L, &registers.HL, &registers.A
+        // };
 
         static u16 *rp[4] = {
             &registers.BC, &registers.DE, &registers.HL, &registers.SP
@@ -521,6 +600,9 @@ namespace CPU
         };
 
         // table rot
+        static void (*rot[8])(u8*) = {
+            cbRLC, cbRRC, cbRL, cbRR, cbSLA, cbSRA, cbSWAP, cbSRL
+        };
 
         enum { x = op>>6, y = (op>>3)&7, z = op&7, p = y>>1, q = y%2 };
         unsigned cyc = 1; // machine cycles, T-states = machine cycles * 4
@@ -539,12 +621,12 @@ namespace CPU
                             /* STOP */
                             case 2: {stop();} break;
                             /* JR d */
-                            jr8:
+                            JR8:
                             case 3: {jr(ft(1)); cyc+=2;} break;
                             case 4: case 5: case 6:
                             // TODO: Fix this because it is wrong
                             /* JR cc[y-4], d */
-                            case 7: {cyc+=1; if (!cc[y-4]) return; goto jr8;} break;
+                            case 7: {cyc+=1; if (!cc[y-4]) return; goto JR8;} break;
                         }
                     } break;
                     // 16-bit [load immediate | add]
@@ -598,20 +680,38 @@ namespace CPU
                     // 8-bit INC
                     case 4: {
                         /* INC r[y] */
-                        *(std::get<y>(r))++; cyc+=(y==6)*2;
+                        if (y!=6) {
+                            // *(std::get<y>(r))++;
+                            (*(u8*)r[y])++;
+                            cyc+=0;
+                        } else {
+                            u8 t = RB(registers.HL);
+                            WB(registers.HL, t++);
+                            cyc+=2;
+                        }
                     } break;
                     // 8-bit DEC
                     case 5: {
                         /* DEC r[y] */
-                        *(std::get<y>(r))--; cyc+=(y==6)*2;
+                        if (y!=6) {
+                            // *(std::get<y>(r))--;
+                            (*(u8*)r[y])--;
+                            cyc+=0;
+                        } else {
+                            u8 t = RB(registers.HL);
+                            WB(registers.HL, t--);
+                            cyc+=2;
+                        }
                     } break;
                     // 8-bit load immediate
                     /* LD r[y], n */
                     case 6: {
                         if (y==6) {
-                            WB(*std::get<y>(r), ft(1)); cyc+=2;
+                            // WB(*std::get<y>(r), ft(1)); cyc+=2;
+                            WB(*(u8*)r[y], ft(1)); cyc+=2;
                         } else {
-                            load8bit(std::get<y>(r), ft(1)); cyc+=1;
+                            // load8bit(std::get<y>(r), ft(1)); cyc+=1;
+                            load8bit((u8*)r[y], ft(1)); cyc+=1;
                         }
                     } break;
                     // operations on [accumulators | flags]
@@ -619,19 +719,23 @@ namespace CPU
                         switch (y) {
                             case 0: {
                                 /* RLCA */
-                                rl(std::get<7>(r), false); cyc+=0;
+                                // rl(std::get<7>(r), false); cyc+=0;
+                                rl((u8*)r[7], false); cyc+=0;
                             } break;
                             case 1: {
                                 /* RRCA */
-                                rr(std::get<7>(r), false); cyc+=0;
+                                // rr(std::get<7>(r), false); cyc+=0;
+                                rr((u8*)r[7], false); cyc+=0;
                             } break;
                             case 2: {
                                 /* RLA */
-                                rl(std::get<7>(r), true); cyc+=0;
+                                // rl(std::get<7>(r), true); cyc+=0;
+                                rl((u8*)r[7], true); cyc+=0;
                             } break;
                             case 3: {
                                 /* RRA */
-                                rr(std::get<7>(r), true); cyc+=0;
+                                // rr(std::get<7>(r), true); cyc+=0;
+                                rr((u8*)r[7], true); cyc+=0;
                             } break;
                             case 4: {
                                 /* DAA */
@@ -669,27 +773,35 @@ namespace CPU
                 } else {
                     /* 8-bit loading (but with registers) */
                     if (y==6)
-                        WB(*std::get<y>(r), *std::get<z>(r));
+                        // WB(*std::get<y>(r), *std::get<z>(r));
+                        WB(*(u16*)r[y], *(u8*)r[z]);
                     else if (z==6)
-                        load8bit(std::get<y>(r), RB(*std::get<z>(r)));
+                        // load8bit(std::get<y>(r), RB(*std::get<z>(r)));
+                        load8bit((u8*)r[y], RB(*(u16*)r[z]));
                     else
-                        load8bit(std::get<y>(r), *std::get<z>(r));
+                        // load8bit(std::get<y>(r), *std::get<z>(r));
+                        load8bit((u8*)r[y], *(u8*)r[z]);
                     cyc+=(z==6 || y==6);
                 }
             } break;                           // end of case x == 1
             case 2: {
                 /* Arithmetic / logic operations -- ALU */
-                alu[y](*std::get<z>(r));
-                // if register is u16 (HL)
-                cyc+=(z==6);
+                if (z==6) {
+                    alu[y](RB(*(u16*)r[z]));
+                    cyc+=1;
+                } else {
+                    alu[y](*(u8*)r[z]);
+                    cyc+=0;
+                }
             } break;                           // end of case x == 2
             case 3: {
                 switch (z) {
                     /* Conditional return, mem-mapped register loads and stack operations */
                     case 0: {
                         switch (y) {
+                            // RET cc[y]
                             case 0: case 1: case 2:
-                            case 3: {ret(cc[y]); cyc+=1;} break;
+                            case 3: {if (cc[y]) {ret(); cyc+=4;} cyc+=1;} break;
                             // LDH (n), A
                             case 4: {WB(0xFF00+ft(1), registers.A); cyc+=2;} break;
                             // ADD SP, n
@@ -704,14 +816,107 @@ namespace CPU
                                 cyc+=3;
                             } break;
                             // LDH A, (n)
-                            case 6: {registers.A = RB(0xFF00+ft(1)); cyc+=2;} break;
+                            case 6: {registers.A  = RB(0xFF00+ft(1)); cyc+=2;} break;
+                            /* LD HL, SP +d */
+                            case 7: {
+                                int16_t s_v = (int16_t) (int8_t) ft(1),
+                                          r = (u16) (int16_t) registers.SP + s_v;
+                                set_flag(FLAG_Z, false);
+                                set_flag(FLAG_H, (r & 0xF) < (registers.SP & 0xF)); // set if carry from bit 11
+                                set_flag(FLAG_C, (r & 0xFF) < (registers.SP & 0xFF)); // set if carry from bit 15
+                                set_flag(FLAG_N, false);
+                                registers.HL = r;
+                                cyc+=2;
+                            } break;
                         }
                     } break;
-                    case 1: break;
-                    case 2: break;
+                    case 1: {
+                        if (q == 1) {
+                            if (p == 0) {
+                                /* RET */
+                                ret();
+                                cyc+=3;
+                                break;
+                            } else if (p == 1) {
+                                /* RETI */
+                                interrupts.IME = 1;
+                                ret();
+                                cyc+=3;
+                            } else if (p == 2) {
+                                /* JP HL */
+                                registers.PC = registers.HL;
+                                cyc+=0;
+                            } else {
+                                /* LD SP, HL */
+                                registers.SP = registers.HL;
+                                cyc+=1;
+                            }
+                        } else {
+                            /* POP rp2[p] */
+                            u16 lo = (u16)RB(registers.SP++);
+                            u16 hi = (u16)RB(registers.SP++);
+                            *rp2[p] = (hi << 0xF) | lo;
+                            cyc+=2;
+                        }
+                    } break;
+                    case 2: {
+                        switch (y) {
+                            case 0: case 1: case 2:
+                            case 3: {
+                                /* JP cc[y], nn */
+                                if (cc[y]) {
+                                    jp(ft(2));
+                                    cyc+=1;
+                                }
+                                cyc+=2;
+                            } break;
+                            case 4: {
+                                /* LD (0xFF00+C), A */
+                                WB(0xFF00 + registers.C, registers.A);
+                                cyc+=1;
+                            } break;
+                            case 5: {
+                                /* LD (nn), A */
+                                WB(ft(2), registers.A);
+                                cyc+=3;
+                            } break;
+                            case 6: {
+                                /* LD A, (0xFF00+C) */
+                                registers.A = RB(0xFF00 + registers.C);
+                                cyc+=1;
+                            } break;
+                            case 7: {
+                                /* LD A, (nn) */
+                                registers.A = RB(ft(2));
+                                cyc+=3;
+                            } break;
+                        }
+                    } break;;
                     case 3: {
                         switch (y) {
+                            /* JP nn */
                             case 0: {jp(ft(2)); cyc+=3;} break;
+                            /* (CB prefix) */
+                            case 1: {
+                                const u8 displacement = ft(1);
+                                const u8 dx = displacement>>6,
+                                             dy = (displacement>>3)&7,
+                                             dz = displacement&7,
+                                             dp = y>>1,
+                                             dq = y%2;
+                                switch (dx) {
+                                    case 0: {
+                                        rot[dy]((u8*)r[dz]);
+                                        cyc+=(dz==6)*2 + 1;
+                                    } break;
+                                }
+                            } break;
+                            case 6: {
+
+                            } break;
+                            case 7: {
+
+                            } break;
                         }
                     } break;
                     case 4: break;
